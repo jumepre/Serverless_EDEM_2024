@@ -118,7 +118,10 @@ class OutputFormatDoFn(beam.DoFn):
         output_dict, texts = element
 
         if len(texts) > 0 :
-
+            
+            license_plate = [text.description for text in texts if text.description.isalnum() and not (text.description.isalph())]
+            
+            output_dict['license_plate'] = license_plate[0 if len(license_plate) > 0 else "not recognised"]
             # Set the pattern to recognize the license plate among the texts the model might find.
 
             # ToDo: Complete this section
@@ -138,6 +141,7 @@ class getVehicleDoFn(beam.DoFn):
     def process(self, element):
 
         # Get vehicle_id from input payload
+        yield element['vehicle_id'], element
 
         # ToDo: Complete this section
  
@@ -152,11 +156,11 @@ class avgSpeedDoFn(beam.DoFn):
 
     def process(self, element):
 
-        import apache_beam as beam
+        import apache_beam as beam # En Dataflow, mejor meter el import dentro del DoFn para evitar que entre en workers distintos.
         
         key, payload = element
         # Calculate the average speed per vehicle
-        avg_speed = # ToDo: Complete this section
+        avg_speed = sum(e["speed"] for e in payload)/len(payload) # ToDo: Complete this section
 
         output_dict = {
             "radar_id": self.radar_id,
@@ -172,14 +176,20 @@ class avgSpeedDoFn(beam.DoFn):
 
             output_dict['is_Ticketed'] = True
 
-            # ToDo: Complete this section
+            #Metrics
+            # self.countfinedVehicles.inc()
+
+            yield beam.pvalue.TaggedOutput("fined_vehicles", output_dict)# ToDo: Complete this section
         
         else:
 
             output_dict['is_Ticketed'] = False
             output_dict['license_plate'] = None
 
-            # ToDo: Complete this section
+            #Metrics
+            # self.countfinedVehicles.inc()
+
+            yield beam.pvalue.TaggedOutput("non_fined_vehicles", output_dict)# ToDo: Complete this section
 
 
 """ Dataflow Process """
@@ -240,20 +250,21 @@ def run():
         processed_data = (
             
             data 
-                | "Extract vehicle id data" >> #ToDo: Complete this section
-                | "User-window based on each vehicle" >> #ToDo: Complete this section
-                | "Group by ID" >> #ToDo: Complete this section
-                | "Avg Speed" >> #ToDo: Complete this section
+                | "Extract vehicle id data" >> beam.ParDo(getVehicleDoFn()) #ToDo: Complete this section
+                | "User-window based on each vehicle" >> beam.WindowInto(window.Sessions(15), timestamp_combiner=window.Timestamp_combiner) #ToDo: Complete this section
+                | "Group by ID" >> beam.GroupByKey() # A partir de aquí genera un JSON que tiene de key el ID del vehículo y de valor una lista de JSONs #ToDo: Complete this section
+                | "print" >> beam.Map(print)
+                | "Avg Speed" >> beam.ParDo(AvgSpeedDoFn(radar_id=args.radar_id)).with_outputs('fined_vehicles', 'non_fined_vehicles') #ToDo: Complete this section
         
         )
 
         (
             processed_data.fined_vehicles
-                | "Capture Vehicle image" >> # ToDo: Complete this section
+                | "Capture Vehicle image" >> beam.map(getVehicleImage, api_url=args.cars_api) # ToDo: Complete this section
                 | "Model Inference" >> RunInference(model_handler=CloudVisionModelHandler())
-                | "Output Format" >> #ToDo: Complete this section
-                | "Encode fined_vehicles to Bytes" >> #ToDo: Complete this section
-                | "Write fined_vehicles to PubSub" >> #ToDo: Complete this section
+                | "Output Format" >> beam.ParDo(OutputFormatDoFn) #ToDo: Complete this section
+                | "Encode fined_vehicles to Bytes" >> beam.Map(lambda x: json.dumps(x).encode("utf-8")) #ToDo: Complete this section
+                | "Write fined_vehicles to PubSub" >> beam.io.WriteToPubSub(topic=args.output_topic) #ToDo: Complete this section
         )
 
         (

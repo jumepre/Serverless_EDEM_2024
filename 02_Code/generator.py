@@ -56,7 +56,7 @@ class PubSubMessages:
     def publishMessages(self, message: str):
         json_str = json.dumps(message)
         topic_path = self.publisher.topic_path(self.project_id, self.topic_name)
-        self.publisher.publish(topic_path, json_str.encode("utf-8"))
+        self.publisher.publish(topic_path, json_str.encode("utf-8")) # Codifica el mensaje (JSON) antes de enviar, siempre el mismo.
         logging.info("A New vehicle has been monitored. Id: %s", message['vehicle_id'])
 
     def __exit__(self):
