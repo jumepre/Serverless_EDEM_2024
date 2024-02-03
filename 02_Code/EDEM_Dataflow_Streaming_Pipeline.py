@@ -47,17 +47,16 @@ DataflowRunner.__test__ = False
 """ Helpful functions """
 def ParsePubSubMessage(message):
 
-    # Decode PubSub message in order to deal with it
-    
-    # ToDo: Complete this section
+    # Decode PubSub message in order to deal with
+    pubsub_message = message.decode('utf-8')
     
     # Convert string decoded in JSON format
-    
-    # ToDo: Complete this section
+    msg = json.loads(pubsub_message)
+
+    logging.info("New message in PubSub: %s", msg)
 
     # Return function
-    
-    # ToDo: Complete this section
+    return msg
 
 def getVehicleImage(item,api_url):
 
@@ -65,19 +64,19 @@ def getVehicleImage(item,api_url):
     import io
 
     # API call to simulate a photo captured by the radar
-    
-    # ToDo: Complete this section
+    image_service = requests.get(api_url)
+    image_url = json.loads(image_service.content.decode('utf-8'))['image_url']
 
-    # Read the image (using io.BytesIO) from the Google Cloud Storage URL obtained in the previous step.
+    #Read image from URL
+    image_response = requests.get(image_url)
+    image_bytes = io.BytesIO(image_response.content).read()
 
-    # ToDo: Complete this section
+    #Append image_url to the payload
+    item ['image_url'] = image_url
 
-    # Append image_url to the payload
-    
-    # ToDo: Complete this section
+    logging.info(image_url)
 
-    # Return
-
+    return item, image_bytes   
 
 class CloudVisionModelHandler(ModelHandler):
 
@@ -86,6 +85,7 @@ class CloudVisionModelHandler(ModelHandler):
         """Initiate the Google Vision API client."""
 
         from google.cloud import vision
+        from google.cloud.vision_v1.types import Feature
         
         client = vision.ImageAnnotatorClient()
         return client
@@ -94,6 +94,8 @@ class CloudVisionModelHandler(ModelHandler):
 
         from google.cloud import vision
         from google.cloud.vision_v1.types import Feature
+
+        from apache_beam.runners import DataflowRunner
 
         feature = Feature()
         feature.type_ = Feature.Type.TEXT_DETECTION
@@ -106,8 +108,8 @@ class CloudVisionModelHandler(ModelHandler):
 
         model_responses = model.batch_annotate_images(request=batch_image_request).responses
 
-        # Deal with the model's response to extract the text we need
-        # ToDo: Complete this section
+        response = model_responses[0].text_annotations
+        output_dict = item_list[0]
         
         yield output_dict, response
 
@@ -118,13 +120,10 @@ class OutputFormatDoFn(beam.DoFn):
         output_dict, texts = element
 
         if len(texts) > 0 :
-            
-            license_plate = [text.description for text in texts if text.description.isalnum() and not (text.description.isalph())]
-            
-            output_dict['license_plate'] = license_plate[0 if len(license_plate) > 0 else "not recognised"]
-            # Set the pattern to recognize the license plate among the texts the model might find.
 
-            # ToDo: Complete this section
+            license_plate = [text.description for text in texts if text.description.isalnum() and not (text.description.isalpha() or text.description.isdigit())]
+
+            output_dict['license_plate'] = license_plate[0] if len(license_plate) > 0 else "not recognized"
             
             yield output_dict
 
@@ -143,9 +142,6 @@ class getVehicleDoFn(beam.DoFn):
         # Get vehicle_id from input payload
         yield element['vehicle_id'], element
 
-        # ToDo: Complete this section
- 
-
 class avgSpeedDoFn(beam.DoFn):
 
     def __init__(self,radar_id):
@@ -156,11 +152,11 @@ class avgSpeedDoFn(beam.DoFn):
 
     def process(self, element):
 
-        import apache_beam as beam # En Dataflow, mejor meter el import dentro del DoFn para evitar que entre en workers distintos.
+        import apache_beam as beam
         
         key, payload = element
-        # Calculate the average speed per vehicle
-        avg_speed = sum(e["speed"] for e in payload)/len(payload) # ToDo: Complete this section
+
+        avg_speed = sum(e["speed"] for e in payload)/len(payload)
 
         output_dict = {
             "radar_id": self.radar_id,
@@ -169,17 +165,14 @@ class avgSpeedDoFn(beam.DoFn):
             "coordinates": payload[-1]['location']
         }
 
-        # Create two distinct PCollections, one for fined vehicles and another for those 
-        # that have not been fined, so we can process the data differently.
-
         if avg_speed > 40:
 
             output_dict['is_Ticketed'] = True
 
             #Metrics
-            # self.countfinedVehicles.inc()
+            # self.countFinedVehicles.inc()
 
-            yield beam.pvalue.TaggedOutput("fined_vehicles", output_dict)# ToDo: Complete this section
+            yield beam.pvalue.TaggedOutput("fined_vehicles", output_dict)
         
         else:
 
@@ -187,9 +180,9 @@ class avgSpeedDoFn(beam.DoFn):
             output_dict['license_plate'] = None
 
             #Metrics
-            # self.countfinedVehicles.inc()
+            # self.countNonFinedVehicles.inc()
 
-            yield beam.pvalue.TaggedOutput("non_fined_vehicles", output_dict)# ToDo: Complete this section
+            yield beam.pvalue.TaggedOutput("non_fined_vehicles", output_dict)
 
 
 """ Dataflow Process """
@@ -211,7 +204,7 @@ def run():
     
     parser.add_argument(
                 '--output_topic',
-                required=True,
+                required=False,
                 help='PubSub Topic which will be the sink for our data.')
 
     parser.add_argument(
@@ -221,7 +214,8 @@ def run():
 
     parser.add_argument(
                 '--cars_api',
-                required=True,
+                required=False,
+                default='https://europe-west1-long-flame-410209.cloudfunctions.net/car-license-plates-api',
                 help="API for retrieving vehicle images.")
 
     args, pipeline_opts = parser.parse_known_args()
@@ -241,8 +235,8 @@ def run():
 
         data = (
             p
-                | "Read From PubSub" >> #ToDo: Complete this section
-                | "Parse JSON messages" >> #ToDo: Complete this section
+                | "Read From PubSub" >> beam.io.ReadFromPubSub(subscription=args.input_subscription)
+                | "Parse JSON messages" >> beam.Map(ParsePubSubMessage)
         )
 
         """ Part 02: Get the aggregated data of the vehicle within the section. """
@@ -250,27 +244,27 @@ def run():
         processed_data = (
             
             data 
-                | "Extract vehicle id data" >> beam.ParDo(getVehicleDoFn()) #ToDo: Complete this section
-                | "User-window based on each vehicle" >> beam.WindowInto(window.Sessions(15), timestamp_combiner=window.Timestamp_combiner) #ToDo: Complete this section
-                | "Group by ID" >> beam.GroupByKey() # A partir de aquí genera un JSON que tiene de key el ID del vehículo y de valor una lista de JSONs #ToDo: Complete this section
-                | "print" >> beam.Map(print)
-                | "Avg Speed" >> beam.ParDo(AvgSpeedDoFn(radar_id=args.radar_id)).with_outputs('fined_vehicles', 'non_fined_vehicles') #ToDo: Complete this section
+                | "Extract vehicle id data" >> beam.ParDo(getVehicleDoFn())
+                | "User-window based on each vehicle" >> beam.WindowInto(window.Sessions(15),timestamp_combiner=window.TimestampCombiner.OUTPUT_AT_EOW)
+                | "Group by ID" >> beam.GroupByKey()
+                | "Avg Speed" >> beam.ParDo(avgSpeedDoFn(radar_id=args.radar_id)).with_outputs('fined_vehicles', 'non_fined_vehicles')
         
         )
 
         (
             processed_data.fined_vehicles
-                | "Capture Vehicle image" >> beam.map(getVehicleImage, api_url=args.cars_api) # ToDo: Complete this section
+                | "Capture Vehicle image" >> beam.Map(getVehicleImage, api_url=args.cars_api)
                 | "Model Inference" >> RunInference(model_handler=CloudVisionModelHandler())
-                | "Output Format" >> beam.ParDo(OutputFormatDoFn) #ToDo: Complete this section
-                | "Encode fined_vehicles to Bytes" >> beam.Map(lambda x: json.dumps(x).encode("utf-8")) #ToDo: Complete this section
-                | "Write fined_vehicles to PubSub" >> beam.io.WriteToPubSub(topic=args.output_topic) #ToDo: Complete this section
+                | "Output Format" >> beam.ParDo(OutputFormatDoFn())
+                | "Encode fined_vehicles to Bytes" >> beam.Map(lambda x: json.dumps(x).encode("utf-8"))
+                | "Write fined_vehicles to PubSub" >> beam.io.WriteToPubSub(topic=args.output_topic)
+                # Estas dos últimas líneas no hacen falta para el entregable, vamos a escribir en BigQuery directamente
         )
 
         (
             processed_data.non_fined_vehicles 
-                | "Encode non_fined_vehicles to Bytes" >> #ToDo: Complete this section
-                | "Write non_fined_vehicles to PubSub" >> #ToDo: Complete this section
+                | "Encode non_fined_vehicles to Bytes" >> beam.Map(lambda x: json.dumps(x).encode("utf-8"))
+                | "Write non_fined_vehicles to PubSub" >> beam.io.WriteToPubSub(topic=args.output_topic)
         )
         
 
